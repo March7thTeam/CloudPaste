@@ -1,14 +1,20 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { Readable } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { S3Client, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { Miniflare, convertV4MiniflareOptions, Log, LogLevel } from "miniflare";
 
 test("isolated Worker preserves authentication and offline S3 signing", { timeout: 60_000 }, async (t) => {
   let outboundRequests = 0;
-  const mf = new Miniflare(convertV4MiniflareOptions({
+  let fixtureRequests = 0;
+  let denyListing = false;
+  const corsHeaders = {
+    "access-control-allow-origin": "*",
+    "access-control-allow-methods": "GET, PUT, DELETE, OPTIONS",
+    "access-control-allow-headers": "*",
+    "access-control-expose-headers": "ETag",
+  };
+  const mf = new Miniflare({ ...convertV4MiniflareOptions({
     modules: true,
     scriptPath: fileURLToPath(new URL("../.test-build/worker.js", import.meta.url)),
     compatibilityDate: "2023-05-18",
@@ -16,11 +22,23 @@ test("isolated Worker preserves authentication and offline S3 signing", { timeou
     d1Persist: false,
     log: new Log(LogLevel.NONE),
     bindings: { ENCRYPTION_SECRET: randomBytes(32).toString("hex") },
-    outboundService() {
+    outboundService(request) {
+      const url = new URL(request.url);
+      if (url.hostname === "s3.invalid") {
+        fixtureRequests += 1;
+        if (request.method === "GET" && url.searchParams.get("list-type") === "2") {
+          const xml = denyListing
+            ? "<Error><Code>AccessDenied</Code><Message>Fixture denial</Message><RequestId>fixture</RequestId></Error>"
+            : '<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>fixture-bucket</Name><KeyCount>1</KeyCount><IsTruncated>false</IsTruncated><Contents><Key>测试&amp;one.txt</Key><Size>3</Size><LastModified>2026-01-01T00:00:00.000Z</LastModified></Contents></ListBucketResult>';
+          return new Response(xml, { status: denyListing ? 403 : 200, headers: { ...corsHeaders, "content-type": "application/xml" } });
+        }
+        if (request.method === "PUT") return new Response(null, { status: 200, headers: { ...corsHeaders, ETag: '"fixture-etag"' } });
+        if (request.method === "DELETE" || request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
+      }
       outboundRequests += 1;
       throw new Error("Network access is forbidden in the isolated Worker test");
     },
-  }));
+  }), telemetry: { enabled: false } });
 
   try {
     const db = await mf.getD1Database("DB");
@@ -103,6 +121,25 @@ test("isolated Worker preserves authentication and offline S3 signing", { timeou
       const file = await db.prepare("SELECT filename, storage_path FROM files WHERE id = ?").bind(result.data.file_id).first();
       assert.equal(file.filename, "测试.txt");
       assert.equal(file.storage_path, result.data.storage_path);
+      assert.equal(fixtureRequests, 0);
+    });
+    await t.test("actual Worker bundle parses S3 listing XML and entities", async () => {
+      const response = await jsonRequest("/api/s3-configs/" + configId + "/test", {}, token);
+      assert.equal(response.status, 200);
+      const result = (await response.json()).data.result.read;
+      assert.equal(result.success, true, result.error);
+      assert.equal(result.objectCount, 1);
+      assert.equal(result.firstObjects[0].key, "测试&one.txt");
+      assert.ok(fixtureRequests > 0);
+    });
+    await t.test("actual Worker bundle preserves structured XML errors", async () => {
+      denyListing = true;
+      const response = await jsonRequest("/api/s3-configs/" + configId + "/test", {}, token);
+      assert.equal(response.status, 200);
+      const result = (await response.json()).data.result.read;
+      assert.equal(result.success, false);
+      assert.match(result.error, /Fixture denial/);
+      assert.doesNotMatch(result.error, /DOMParser/);
     });
     await t.test("logout revokes the session", async () => {
       assert.equal((await jsonRequest("/api/admin/logout", {}, token)).status, 200);
@@ -111,30 +148,5 @@ test("isolated Worker preserves authentication and offline S3 signing", { timeou
     assert.equal(outboundRequests, 0);
   } finally {
     await mf.dispose();
-  }
-});
-
-test("updated S3 transport parses a normal XML listing without network access", async () => {
-  let requests = 0;
-  const xml = '<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>fixture-bucket</Name><KeyCount>1</KeyCount><IsTruncated>false</IsTruncated><Contents><Key>one&amp;two.txt</Key><Size>3</Size></Contents></ListBucketResult>';
-  const client = new S3Client({
-    region: "us-east-1", endpoint: "https://s3.invalid", forcePathStyle: true,
-    credentials: { accessKeyId: "fixture-only", secretAccessKey: "fixture-only" },
-    requestHandler: {
-      async handle(request) {
-        requests += 1;
-        assert.equal(request.hostname, "s3.invalid");
-        return { response: { statusCode: 200, headers: { "content-type": "application/xml" }, body: Readable.from([xml]) } };
-      },
-    },
-  });
-  try {
-    const result = await client.send(new ListObjectsV2Command({ Bucket: "fixture-bucket" }));
-    assert.equal(result.Name, "fixture-bucket");
-    assert.equal(result.Contents[0].Key, "one&two.txt");
-    assert.equal(result.Contents[0].Size, 3);
-    assert.equal(requests, 1);
-  } finally {
-    client.destroy();
   }
 });
