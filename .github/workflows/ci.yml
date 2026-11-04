@@ -32,6 +32,8 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run build
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
 
   backend:
     name: Worker dry run
@@ -54,8 +56,10 @@ jobs:
           cache-dependency-path: backend/package-lock.json
       - name: Install from lockfile
         run: npm ci
-      - name: Bundle without deploying
-        run: npx --no-install wrangler deploy --dry-run --outdir ../worker-build
+      - name: Bundle and test isolated Worker contracts
+        run: npm test
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
 
   march7th-paste:
     name: March7th Paste checks
@@ -84,3 +88,5 @@ jobs:
         run: npm test
       - name: Build application
         run: npm run build
+      - name: Audit dependencies
+        run: npm audit --audit-level=high

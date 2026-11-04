@@ -1,14 +1,12 @@
 name: Deploy Frontend to Cloudflare Pages
 
 on:
-  push:
-    branches: [main, master]
-    paths:
-      - "frontend/**"
-      - "!frontend/vercel.json"
   workflow_dispatch:
   repository_dispatch:
     types: [deploy-button]
+
+permissions:
+  contents: read
 
 jobs:
   deploy-frontend-cloudflare:
@@ -24,7 +22,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: "./frontend/package-lock.json"
 

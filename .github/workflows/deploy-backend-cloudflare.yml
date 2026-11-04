@@ -1,13 +1,12 @@
 name: Deploy Backend to Cloudflare Workers
 
 on:
-  push:
-    branches: [main, master]
-    paths:
-      - "backend/**"
   workflow_dispatch:
   repository_dispatch:
     types: [deploy-button]
+
+permissions:
+  contents: read
 
 jobs:
   deploy-backend:
@@ -23,7 +22,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: "./backend/package-lock.json"
 
